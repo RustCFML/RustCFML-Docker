@@ -66,7 +66,8 @@ docker run --rm -p 8500:8500 -v "$PWD:/app" ghcr.io/rustcfml/rustcfml --verbose 
 | `RUSTCFML_MODE` | `production` | `production` caches Application.cfc resolution, URL→file resolution and bytecode until restart; `dev` re-checks on every request |
 | `RUSTCFML_WEBROOT` | `/app` | Directory to serve |
 | `RUSTCFML_PORT` | `8500` | TCP port |
-| `RUSTCFML_SOCKET` | unset | Bind a Unix socket at this path instead of a TCP port (for an nginx/Caddy in the same pod). Must be a path the `nonroot` user can create, e.g. `/tmp/rustcfml.sock` |
+| `RUSTCFML_SOCKET` | unset | Bind a Unix socket at this path instead of a TCP port (for a proxy in a *separate* container). Must be a path the `nonroot` user can create, e.g. `/tmp/rustcfml.sock`. Cannot be combined with `RUSTCFML_PROXY=nginx` |
+| `RUSTCFML_PROXY` | `none` | `nginx` runs nginx in front of the engine inside this container, reaching it over a Unix socket. See [Fronting with nginx](#fronting-with-nginx) |
 | `RUSTCFML_MAX_MEMORY` | `auto` | Process memory limit: `auto` (75% of the cgroup limit), or an explicit `1.5G` / `1536M`; empty to disable. Above 85% new requests get 503 + Retry-After while the process sheds; above 95% the in-flight request that has allocated the most is aborted, so one runaway cannot OOM the container |
 | `RUSTCFML_EXTENSIONS` | unset | Extra `.rcx` directory, searched first |
 | `RUSTCFML_EXTENSIONS_STRICT` | `1` | Refuse to start if any extension fails to load (exit 78). `0` logs and continues |
@@ -78,6 +79,40 @@ Datasources, mappings, logging and other engine settings go in a
 [`.cfconfig.json`](https://github.com/RustCFML/RustCFML/blob/main/docs/configuration.md)
 in the webroot. Application-level files beside an `Application.cfc` overlay the
 server baseline.
+
+## Fronting with nginx
+
+```bash
+docker run -e RUSTCFML_PROXY=nginx -p 8500:8500 -v "$PWD:/app" ghcr.io/rustcfml/rustcfml
+```
+
+nginx takes the published port and reaches the engine over a Unix socket at
+`/run/rustcfml.sock`, so requests never cross the loopback TCP stack: no
+three-way handshake per connection, no `TIME_WAIT` accumulation, no ephemeral
+port exhaustion under load. It also buffers slow clients, which keeps a request
+from occupying an engine thread while a phone on a train uploads a form.
+
+Both processes run in this container, supervised by the entrypoint: if either
+exits the other is stopped and the container exits, so your orchestrator
+restarts a whole, healthy unit rather than a half-dead one. On a stop signal
+nginx is drained with `SIGQUIT` and the engine with `SIGTERM`, so in-flight
+requests finish.
+
+It is **off by default** — with `RUSTCFML_PROXY=none` the engine binds the port
+itself and is PID 1, exactly as before. nginx is installed either way: it costs
+**4 MB** on a 153 MB image, which is not worth a second published variant and a
+"which tag do I want?" question on every deployment.
+
+The proxy passes `Host`, `X-Real-IP`, `X-Forwarded-For` and `X-Forwarded-Proto`
+(preserving an upstream terminator's value), and passes WebSocket upgrades
+through. To change anything else — serving static assets straight from nginx is
+the obvious one — mount your own config over `/etc/nginx/nginx.conf`. It is a
+template: `__PORT__` and `__SOCKET__` are substituted at startup.
+
+**When not to use it.** If your platform already has a proxy in front (an
+ingress controller, an ALB, Fly's edge), a second one inside the container adds
+a hop for little gain — use `RUSTCFML_PROXY=none`. If you want nginx in its own
+container, use `RUSTCFML_SOCKET` with a shared volume instead.
 
 ## Native extensions
 

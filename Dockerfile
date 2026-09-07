@@ -59,12 +59,19 @@ FROM cgr.dev/chainguard/wolfi-base:latest AS runtime
 # tzdata: dateFormat/timezone BIFs need zoneinfo. curl: the HEALTHCHECK, and
 # handy in derived images. ca-certificates is already in the base (TLS to
 # databases, cfhttp, S3).
-RUN apk add --no-cache tzdata curl
+# nginx is installed but NOT started unless RUSTCFML_PROXY=nginx. One image
+# rather than two published variants: nginx and its dependencies measure +4 MB on a
+# 153 MB image (157 MB with), so a separate slim tag would save nothing worth the
+# split build, the second thing to promote, and the "which tag do I want?"
+# question for every user.
+RUN apk add --no-cache tzdata curl nginx \
+    && mkdir -p /var/lib/nginx/tmp/client_body /var/lib/nginx/tmp/proxy
 
 COPY --from=fetch /out/rustcfml /out/LICENSE /out/THIRD-PARTY.txt /out/VERSION /opt/rustcfml/
 COPY docker/entrypoint.sh            /usr/local/bin/rustcfml-entrypoint
 COPY docker/warm-extensions.sh       /usr/local/bin/rustcfml-warm-extensions
 COPY docker/healthcheck.sh           /usr/local/bin/rustcfml-healthcheck
+COPY docker/nginx.conf               /etc/nginx/nginx.conf
 
 # /app is the webroot. /opt/rustcfml/extensions is the image-level extension
 # directory (searched last). Both, plus the nonroot home (where the loader's
@@ -74,6 +81,7 @@ RUN ln -s /opt/rustcfml/rustcfml /usr/local/bin/rustcfml \
     && chmod 0755 /usr/local/bin/rustcfml-entrypoint /usr/local/bin/rustcfml-warm-extensions /usr/local/bin/rustcfml-healthcheck \
     && mkdir -p /app /opt/rustcfml/extensions /home/nonroot/.rustcfml/extensions /home/nonroot/.rustcfml/ext-cache \
     && chown -R nonroot:nonroot /app /opt/rustcfml/extensions /home/nonroot \
+    && chown -R nonroot:nonroot /var/lib/nginx /run \
     && rustcfml --version
 
 USER nonroot
@@ -91,7 +99,8 @@ ENV HOME=/home/nonroot \
     RUSTCFML_MODE=production \
     RUSTCFML_WEBROOT=/app \
     RUSTCFML_PORT=8500 \
-    RUSTCFML_MAX_MEMORY=auto
+    RUSTCFML_MAX_MEMORY=auto \
+    RUSTCFML_PROXY=none
 
 WORKDIR /app
 EXPOSE 8500
