@@ -98,3 +98,52 @@ jobs:
       - name: Inspect the manifest
         if: github.event_name != 'pull_request'
         run: docker buildx imagetools inspect "${{ steps.ver.outputs.image }}:${{ github.ref_type == 'tag' && steps.ver.outputs.version || 'edge' }}"
+
+      # A published image nobody can pull is not published. GHCR creates a
+      # container package PRIVATE on first push regardless of how public the
+      # repository is, and nothing in the push reports that — the build goes
+      # green, the manifest inspects fine (the runner is authenticated), and the
+      # `FROM ghcr.io/…` line in our own README fails for every user and for any
+      # CI that tries to build on it. This step is the check that was missing:
+      # it asks the registry for an ANONYMOUS pull token and fetches the
+      # manifest with it, exactly as a stranger would.
+      - name: Can a stranger pull it?
+        if: github.event_name != 'pull_request'
+        run: |
+          set -uo pipefail
+          REPO=$(echo "${{ github.repository_owner }}/rustcfml" | tr '[:upper:]' '[:lower:]')
+          REF='${{ github.ref_type == 'tag' && steps.ver.outputs.version || 'edge' }}'
+          # A PRIVATE package refuses the anonymous token itself, so a missing
+          # token is the answer — do not let `set -e` and `curl -f` turn that
+          # into a bare curl error.
+          TOKEN=$(curl -sS "https://ghcr.io/token?scope=repository:${REPO}:pull&service=ghcr.io" \
+                  | jq -r '.token // empty' 2>/dev/null || true)
+          if [ -n "$TOKEN" ]; then
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://ghcr.io/v2/${REPO}/manifests/${REF}")
+          else
+            CODE="401 — the registry would not even issue an anonymous pull token"
+          fi
+          if [ "$CODE" = "200" ]; then
+            echo "ghcr.io/${REPO}:${REF} is publicly pullable."
+            exit 0
+          fi
+          echo "::warning title=Image is not publicly pullable::Anonymous pull of ghcr.io/${REPO}:${REF} gave ${CODE}. The image is published but nobody can use it."
+          {
+            echo "### :warning: \`ghcr.io/${REPO}\` is not publicly pullable"
+            echo
+            echo "An anonymous pull gave **${CODE}**. The push succeeded, but every"
+            echo "\`docker pull\`, every \`FROM\` in a downstream Dockerfile and every CI"
+            echo "builder — including Fly.io's — gets \`unauthorized\`."
+            echo
+            echo "GHCR creates a container package **private on first publish**, whatever the"
+            echo "repository's visibility, and there is no REST API to change it. Fix it once,"
+            echo "by hand:"
+            echo
+            echo "1. <https://github.com/orgs/${{ github.repository_owner }}/packages/container/rustcfml/settings>"
+            echo "2. **Danger Zone → Change package visibility → Public**"
+            echo
+            echo "It stays public for every later push."
+          } >> "$GITHUB_STEP_SUMMARY"

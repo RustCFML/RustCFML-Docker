@@ -169,6 +169,25 @@ the smoke test.
 | `latest` | latest tagged release |
 | `edge` | last push to `main` |
 
+### Package visibility — a one-time manual step
+
+**GHCR creates a container package private on its first publish, whatever the
+repository's visibility.** A public repo does not make a public package, nothing
+in the push reports it, and the build goes green: the image is there, the
+manifest inspects fine from the authenticated runner, and yet every
+`docker pull`, every `FROM ghcr.io/rustcfml/rustcfml` in a downstream Dockerfile
+and every CI builder gets `unauthorized`. There is no REST API to change it.
+
+Fix it once, in the UI:
+
+1. <https://github.com/orgs/RustCFML/packages/container/rustcfml/settings>
+2. **Danger Zone → Change package visibility → Public**
+
+It stays public for every later push. The *Can a stranger pull it?* step in
+[`build.yml`](.github/workflows/build.yml) checks this after every publish — it
+asks the registry for an anonymous pull token exactly as a stranger would — and
+warns loudly in the job summary if the answer is no.
+
 ## Releasing a new engine version
 
 1. Bump `ARG RUSTCFML_VERSION` in the `Dockerfile` to the new release tag.
