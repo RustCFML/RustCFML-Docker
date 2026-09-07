@@ -24,8 +24,13 @@
 #
 # See README.md for every environment variable the entrypoint understands.
 
-# v0.653.14 is the first release that shuts down gracefully on SIGTERM (see
-# STOPSIGNAL below). Override with --build-arg RUSTCFML_VERSION=vX.Y.Z.
+# The engine version this image packages, and the single source of truth for it:
+# CI refuses a git tag that disagrees with this line, and the "Follow the
+# engine's stable release" workflow bumps it when a new engine build is promoted
+# to stable. Override for a one-off build with
+# --build-arg RUSTCFML_VERSION=vX.Y.Z.
+#
+# Graceful shutdown on SIGTERM needs >= v0.653.14 (see STOPSIGNAL below).
 ARG RUSTCFML_VERSION=v0.653.14
 
 # ---------------------------------------------------------------------------

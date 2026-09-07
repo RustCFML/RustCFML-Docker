@@ -197,12 +197,29 @@ warns loudly in the job summary if the answer is no.
 
 ## Releasing a new engine version
 
-1. Bump `ARG RUSTCFML_VERSION` in the `Dockerfile` to the new release tag.
+**Normally you do not.** [`follow-engine.yml`](.github/workflows/follow-engine.yml)
+checks hourly whether the engine has a newer **stable** release, and if so bumps
+`ARG RUSTCFML_VERSION`, commits, tags and publishes the image — no manual step.
+
+It follows the engine's *stable* channel, not its tags: RustCFML publishes every
+version tag as a prerelease and a human promotes one to stable once it has been
+run in anger. So the image only ever moves onto a build somebody deliberately
+blessed; promoting the engine is the decision, and this repo just follows it.
+Disable the workflow to pin the image behind the engine on purpose.
+
+To do it by hand anyway — an image-only change, or packaging a version that is
+not the latest stable:
+
+1. Bump `ARG RUSTCFML_VERSION` in the `Dockerfile` to the release tag.
 2. Commit, tag `v<version>` (or `v<version>-<n>` for an image-only change), push the tag.
 
 CI refuses a tag whose version does not match the Dockerfile. The
 `workflow_dispatch` form also takes an engine version, pushed as `edge`, to
 try a release before tagging.
+
+> A tag pushed by a workflow using `GITHUB_TOKEN` does not trigger other
+> workflows — GitHub blocks that to stop workflows looping on their own pushes —
+> so `follow-engine.yml` dispatches the build explicitly, on the tag ref.
 
 ## Building locally
 

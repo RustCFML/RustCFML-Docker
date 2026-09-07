@@ -1,0 +1,107 @@
+name: Follow the engine's stable release
+
+# The image pins an engine version in the Dockerfile, and nothing about a
+# RustCFML release reaches this repo on its own. Without this workflow every
+# engine release needs a manual bump-commit-tag here, and the image quietly
+# falls behind until somebody remembers.
+#
+# It follows the engine's STABLE channel, not its tags. RustCFML publishes every
+# version tag as a prerelease and a human promotes one to stable once it has
+# been run in anger (see the engine's docs/releasing.md), and `gh release view`
+# resolves to that promoted release. So this can only ever move the image onto a
+# build somebody deliberately blessed: the safety gate is the promotion, and
+# this workflow just stops the bookkeeping being a chore.
+#
+# To pin the image deliberately behind the engine, disable this workflow — the
+# Dockerfile's ARG stays the single source of truth either way.
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # commit the bump, push the tag
+  actions: write    # dispatch the build on that tag
+
+concurrency:
+  group: follow-engine
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Is a newer stable engine out?
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PINNED=$(sed -nE 's/^ARG RUSTCFML_VERSION=(v[0-9.]+).*/\1/p' Dockerfile | head -1)
+          # No tag argument: the GitHub "latest release" endpoint, which excludes
+          # prereleases — i.e. the promoted, stable one.
+          LATEST=$(gh release view --repo RustCFML/RustCFML --json tagName --jq .tagName)
+          echo "pinned=${PINNED} latest stable=${LATEST}"
+          {
+            echo "pinned=${PINNED}"
+            echo "latest=${LATEST}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ -z "$PINNED" ] || [ -z "$LATEST" ]; then
+            echo "::error::could not resolve versions (pinned='${PINNED}' latest='${LATEST}')"
+            exit 1
+          fi
+          if [ "$PINNED" = "$LATEST" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Already packaging the latest stable engine (\`${PINNED}\`)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # An existing tag means a half-finished sync or a hand-made release;
+          # moving a published tag is never the right repair, so stop and say so.
+          if gh api "repos/${{ github.repository }}/git/ref/tags/${LATEST}" >/dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Sync needs a human::Tag ${LATEST} already exists in this repo but the Dockerfile pins ${PINNED}. Not moving a published tag — reconcile by hand."
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Bump, commit and tag
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          LATEST='${{ steps.check.outputs.latest }}'
+          PINNED='${{ steps.check.outputs.pinned }}'
+          sed -i -E "s|^ARG RUSTCFML_VERSION=v[0-9.]+|ARG RUSTCFML_VERSION=${LATEST}|" Dockerfile
+          # Prove the edit landed rather than trusting sed's exit status.
+          grep -qx "ARG RUSTCFML_VERSION=${LATEST}" Dockerfile
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Package RustCFML ${LATEST} (was ${PINNED})"
+          git tag "${LATEST}"
+          git push origin "HEAD:${{ github.ref_name }}" "refs/tags/${LATEST}"
+
+      - name: Build and publish that tag
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          LATEST='${{ steps.check.outputs.latest }}'
+          # A tag pushed with GITHUB_TOKEN does NOT trigger workflows — GitHub
+          # blocks that to stop a workflow looping on its own pushes — so the
+          # build has to be asked for explicitly. Dispatching ON THE TAG REF is
+          # what matters: it makes `github.ref_type` == 'tag' inside build.yml,
+          # which is the condition that publishes :vX.Y.Z, :X.Y and :latest
+          # rather than :edge.
+          gh workflow run build.yml --ref "${LATEST}"
+          {
+            echo "### Packaging RustCFML \`${LATEST}\`"
+            echo
+            echo "Bumped from \`${{ steps.check.outputs.pinned }}\`, tagged, and the image"
+            echo "build dispatched on that tag."
+            echo
+            echo "[Build runs](${{ github.server_url }}/${{ github.repository }}/actions/workflows/build.yml)"
+          } >> "$GITHUB_STEP_SUMMARY"
