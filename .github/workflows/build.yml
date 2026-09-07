@@ -142,8 +142,9 @@ jobs:
             echo "repository's visibility, and there is no REST API to change it. Fix it once,"
             echo "by hand:"
             echo
-            echo "1. <https://github.com/orgs/${{ github.repository_owner }}/packages/container/rustcfml/settings>"
-            echo "2. **Danger Zone → Change package visibility → Public**"
+            echo "1. <https://github.com/organizations/${{ github.repository_owner }}/settings/packages> → *Package creation* → tick **Public**."
+            echo "   (Until this is on, the option in step 2 is greyed out and does not say why.)"
+            echo "2. <https://github.com/orgs/${{ github.repository_owner }}/packages/container/rustcfml/settings> → *Danger Zone* → **Change package visibility → Public**."
             echo
             echo "It stays public for every later push."
           } >> "$GITHUB_STEP_SUMMARY"

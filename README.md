@@ -178,12 +178,19 @@ manifest inspects fine from the authenticated runner, and yet every
 `docker pull`, every `FROM ghcr.io/rustcfml/rustcfml` in a downstream Dockerfile
 and every CI builder gets `unauthorized`. There is no REST API to change it.
 
-Fix it once, in the UI:
+Fix it once, in the UI — **both steps**, in this order:
 
-1. <https://github.com/orgs/RustCFML/packages/container/rustcfml/settings>
-2. **Danger Zone → Change package visibility → Public**
+1. **Allow the org to have public packages at all.**
+   <https://github.com/organizations/RustCFML/settings/packages> →
+   *Package creation* → tick **Public**. Until this is on, the visibility
+   option in step 2 is greyed out, which is the confusing part: the package
+   page simply will not let you choose Public and does not say why.
+2. **Make this package public.**
+   <https://github.com/orgs/RustCFML/packages/container/rustcfml/settings> →
+   *Danger Zone* → **Change package visibility → Public**.
 
-It stays public for every later push. The *Can a stranger pull it?* step in
+It stays public for every later push. Neither step has a REST API, so neither
+can be automated. The *Can a stranger pull it?* step in
 [`build.yml`](.github/workflows/build.yml) checks this after every publish — it
 asks the registry for an anonymous pull token exactly as a stranger would — and
 warns loudly in the job summary if the answer is no.
