@@ -1,0 +1,13 @@
+# Run a CFML app from ./webroot on http://localhost:8500 — `docker compose up`.
+services:
+  rustcfml:
+    image: ghcr.io/rustcfml/rustcfml:latest
+    # build: .                      # uncomment to build the image locally instead
+    ports:
+      - "8500:8500"
+    volumes:
+      - ./examples/hello/webroot:/app
+    environment:
+      RUSTCFML_MODE: dev            # production (default) caches everything until restart
+      # RUSTCFML_MAX_MEMORY: auto   # 503 + Retry-After above 85% of the cgroup limit
+    # mem_limit: 1g
