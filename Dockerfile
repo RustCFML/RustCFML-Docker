@@ -31,7 +31,7 @@
 # --build-arg RUSTCFML_VERSION=vX.Y.Z.
 #
 # Graceful shutdown on SIGTERM needs >= v0.653.14 (see STOPSIGNAL below).
-ARG RUSTCFML_VERSION=v0.683.0
+ARG RUSTCFML_VERSION=v0.685.1
 
 # ---------------------------------------------------------------------------
 # Stage 1: fetch the release binary for the TARGET platform, running on the
