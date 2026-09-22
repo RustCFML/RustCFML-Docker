@@ -9,7 +9,7 @@ PORT="${SMOKE_PORT:-8599}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "--- serve + request"
-cid=$(docker run -d --rm -p "$PORT:8500" -v "$HERE/examples/hello/webroot:/app" -e RUSTCFML_MODE=dev "$IMAGE")
+cid=$(docker run -d --rm -p "$PORT:8500" -v "$HERE/examples/hello/webroot:/srv/app" -e RUSTCFML_MODE=dev "$IMAGE")
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 for i in $(seq 1 40); do
   body=$(curl -s "http://127.0.0.1:$PORT/index.cfm" || true)
@@ -41,7 +41,7 @@ echo "--- stop is fast (SIGTERM, the signal every orchestrator sends)"
 # removed the moment it exits, inspect then errors, and a naive
 # `|| echo false` fallback silently reports "still running" for a container
 # that stopped instantly.
-cid=$(docker run -d -p "$PORT:8500" -v "$HERE/examples/hello/webroot:/app" "$IMAGE")
+cid=$(docker run -d -p "$PORT:8500" -v "$HERE/examples/hello/webroot:/srv/app" "$IMAGE")
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$PORT/index.cfm" && break; sleep 0.25; done
 start=$(date +%s)
@@ -63,7 +63,7 @@ docker rm -f "$cid" >/dev/null; trap - EXIT
 echo "stopped in ${took}s"
 
 echo "--- nginx front (RUSTCFML_PROXY=nginx, engine on a unix socket)"
-cid=$(docker run -d --rm -p "$PORT:8500" -v "$HERE/examples/hello/webroot:/app" -e RUSTCFML_PROXY=nginx "$IMAGE")
+cid=$(docker run -d --rm -p "$PORT:8500" -v "$HERE/examples/hello/webroot:/srv/app" -e RUSTCFML_PROXY=nginx "$IMAGE")
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 for i in $(seq 1 80); do
   body=$(curl -s "http://127.0.0.1:$PORT/index.cfm" || true)
@@ -90,13 +90,13 @@ echo "--- broken extension is fatal by default"
 tmp=$(mktemp -d); mkdir -p "$tmp/extensions"; echo junk > "$tmp/extensions/bad-0.0.1.rcx"
 cp "$HERE/examples/hello/webroot/index.cfm" "$tmp/"
 set +e
-out=$(docker run --rm -v "$tmp:/app" "$IMAGE" 2>&1); rc=$?
+out=$(docker run --rm -v "$tmp:/srv/app" "$IMAGE" 2>&1); rc=$?
 set -e
 echo "$out"
 [ "$rc" -eq 78 ] || fail "expected exit 78, got $rc"
 
 echo "--- RUSTCFML_EXTENSIONS_STRICT=0 continues"
-cid=$(docker run -d --rm -p "$PORT:8500" -v "$tmp:/app" -e RUSTCFML_EXTENSIONS_STRICT=0 "$IMAGE")
+cid=$(docker run -d --rm -p "$PORT:8500" -v "$tmp:/srv/app" -e RUSTCFML_EXTENSIONS_STRICT=0 "$IMAGE")
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$PORT/index.cfm" && break; sleep 0.25; done
 docker logs "$cid" 2>&1 | grep -q "1 problem" || fail "problem not reported"
@@ -109,7 +109,7 @@ if [ -n "${SMOKE_RCX:-}" ]; then
   tmp=$(mktemp -d); mkdir -p "$tmp/extensions"; cp "$SMOKE_RCX" "$tmp/extensions/"
   fn="${SMOKE_RCX_FN:-hello_extGreet}"
   printf '<cfoutput>#%s( "smoke" )#</cfoutput>\n' "$fn" > "$tmp/index.cfm"
-  cid=$(docker run -d --rm -p "$PORT:8500" -v "$tmp:/app" "$IMAGE")
+  cid=$(docker run -d --rm -p "$PORT:8500" -v "$tmp:/srv/app" "$IMAGE")
   trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
   for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$PORT/index.cfm" && break; sleep 0.25; done
   docker logs "$cid" 2>&1 | grep -E "extensions —|Loaded extension"
@@ -119,4 +119,23 @@ if [ -n "${SMOKE_RCX:-}" ]; then
   docker exec "$cid" sh -c 'ls /home/nonroot/.rustcfml/ext-cache/*/' | grep -q . || fail "ext-cache not populated"
   docker rm -f "$cid" >/dev/null; trap - EXIT; rm -rf "$tmp"
 fi
+echo "--- legacy /app mount still serves, and says why it is legacy"
+# The default webroot moved from /app to /srv/app. Anything written against the
+# old default must keep working: rustcfml-webroot falls back to /app when it has
+# content and /srv/app does not, and prints the reason once.
+cid=$(docker run -d --rm -p "$PORT:8500" -v "$HERE/examples/hello/webroot:/app" "$IMAGE")
+trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$PORT/index.cfm" && break; sleep 0.25; done
+curl -s "http://127.0.0.1:$PORT/index.cfm" | grep -q "Hello from RustCFML" || fail "legacy /app mount did not serve"
+docker logs "$cid" 2>&1 | grep -q "the default webroot is now /srv/app" || fail "no advisory for the legacy /app mount"
+docker rm -f "$cid" >/dev/null; trap - EXIT
+
+echo "--- an explicit RUSTCFML_WEBROOT is taken as given, with no advisory"
+cid=$(docker run -d --rm -p "$PORT:8500" -v "$HERE/examples/hello/webroot:/app" -e RUSTCFML_WEBROOT=/app "$IMAGE")
+trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$PORT/index.cfm" && break; sleep 0.25; done
+curl -s "http://127.0.0.1:$PORT/index.cfm" | grep -q "Hello from RustCFML" || fail "explicit webroot did not serve"
+docker logs "$cid" 2>&1 | grep -q "the default webroot is now /srv/app" && fail "advisory printed despite an explicit RUSTCFML_WEBROOT"
+docker rm -f "$cid" >/dev/null; trap - EXIT
+
 echo "ALL OK"

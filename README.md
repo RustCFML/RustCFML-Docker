@@ -14,15 +14,15 @@ before the server starts.
 ## Run an app
 
 ```sh
-docker run --rm -p 8500:8500 -v "$PWD/webroot:/app" ghcr.io/rustcfml/rustcfml
+docker run --rm -p 8500:8500 -v "$PWD/webroot:/srv/app" ghcr.io/rustcfml/rustcfml
 ```
 
-Open http://localhost:8500. The webroot is `/app`; the default mode is
+Open http://localhost:8500. The webroot is `/srv/app`; the default mode is
 `production` (everything is cached until restart). For local development, where
 edits should show up without a restart:
 
 ```sh
-docker run --rm -p 8500:8500 -v "$PWD/webroot:/app" -e RUSTCFML_MODE=dev ghcr.io/rustcfml/rustcfml
+docker run --rm -p 8500:8500 -v "$PWD/webroot:/srv/app" -e RUSTCFML_MODE=dev ghcr.io/rustcfml/rustcfml
 ```
 
 Or with compose, see [`docker-compose.yml`](docker-compose.yml): `docker compose up`.
@@ -31,10 +31,10 @@ Or with compose, see [`docker-compose.yml`](docker-compose.yml): `docker compose
 
 ```dockerfile
 FROM ghcr.io/rustcfml/rustcfml:v0.653.3
-COPY --chown=nonroot:nonroot webroot/ /app/
+COPY --chown=nonroot:nonroot webroot/ /srv/app/
 ```
 
-If the app ships native extensions in `/app/extensions/`, warm them at build
+If the app ships native extensions in `/srv/app/extensions/`, warm them at build
 time so the first container start does not pay for extracting them, and so a
 broken or wrong-platform archive fails the *build* rather than the deploy:
 
@@ -52,11 +52,11 @@ The first argument decides what runs. A flag (or nothing) serves; anything else
 is passed to the engine as-is:
 
 ```sh
-docker run --rm -v "$PWD:/app" ghcr.io/rustcfml/rustcfml script.cfm      # run a CFML file
-docker run --rm -v "$PWD:/app" ghcr.io/rustcfml/rustcfml ext list        # installed extensions
+docker run --rm -v "$PWD:/srv/app" ghcr.io/rustcfml/rustcfml script.cfm      # run a CFML file
+docker run --rm -v "$PWD:/srv/app" ghcr.io/rustcfml/rustcfml ext list        # installed extensions
 docker run --rm ghcr.io/rustcfml/rustcfml --version
 docker run --rm ghcr.io/rustcfml/rustcfml --licenses
-docker run --rm -p 8500:8500 -v "$PWD:/app" ghcr.io/rustcfml/rustcfml --verbose   # serve, extra flag
+docker run --rm -p 8500:8500 -v "$PWD:/srv/app" ghcr.io/rustcfml/rustcfml --verbose   # serve, extra flag
 ```
 
 ## Configuration
@@ -64,7 +64,7 @@ docker run --rm -p 8500:8500 -v "$PWD:/app" ghcr.io/rustcfml/rustcfml --verbose 
 | Variable | Default | Meaning |
 |---|---|---|
 | `RUSTCFML_MODE` | `production` | `production` caches Application.cfc resolution, URL→file resolution and bytecode until restart; `dev` re-checks on every request |
-| `RUSTCFML_WEBROOT` | `/app` | Directory to serve |
+| `RUSTCFML_WEBROOT` | `/srv/app` | Directory to serve. Unset, `/app` is used instead when that is where the app is mounted — see [Webroot](#webroot) |
 | `RUSTCFML_PORT` | `8500` | TCP port |
 | `RUSTCFML_SOCKET` | unset | Bind a Unix socket at this path instead of a TCP port (for a proxy in a *separate* container). Must be a path the `nonroot` user can create, e.g. `/tmp/rustcfml.sock`. Cannot be combined with `RUSTCFML_PROXY=nginx` |
 | `RUSTCFML_PROXY` | `none` | `nginx` runs nginx in front of the engine inside this container, reaching it over a Unix socket. See [Fronting with nginx](#fronting-with-nginx) |
@@ -80,10 +80,43 @@ Datasources, mappings, logging and other engine settings go in a
 in the webroot. Application-level files beside an `Application.cfc` overlay the
 server baseline.
 
+## Webroot
+
+The webroot is `/srv/app`. Mount the app there, or `COPY` it there in a derived
+image, or point `RUSTCFML_WEBROOT` wherever you like.
+
+**It used to be `/app`, and anything still mounting there keeps working** — the
+entrypoint falls back to `/app` when it has content and `/srv/app` does not, and
+says so once in the log. Setting `RUSTCFML_WEBROOT` explicitly silences that and
+is always taken as given.
+
+### Why not `/app`
+
+`/app` is the obvious name for a container webroot. It is also the name ColdBox
+gives its application mapping by default — `appMapping`, which Preside inherits
+— and the engine resolves a CFML mapping prefix before it consults the
+filesystem. With the webroot at `/app` and that mapping registered, a real path
+like `/app/preside/system/views` resolves *through the mapping* to
+`/app/application/preside/system/views`, so `directoryExists()` answers false
+for a directory that is plainly there.
+
+ColdBox's own bootstrap does exactly that check, and dies with:
+
+```
+ViewsExternalLocation could not be found.
+```
+
+Nothing in that message points at the webroot, and the directory it is
+complaining about is visibly present in the container — which is why the default
+moved rather than the trap being written down and left in place. The same shape
+can bite any app whose CFML mapping is named after a real top-level directory,
+so if you set `RUSTCFML_WEBROOT` yourself, avoid a path whose first segment
+matches one of your mappings.
+
 ## Fronting with nginx
 
 ```bash
-docker run -e RUSTCFML_PROXY=nginx -p 8500:8500 -v "$PWD:/app" ghcr.io/rustcfml/rustcfml
+docker run -e RUSTCFML_PROXY=nginx -p 8500:8500 -v "$PWD:/srv/app" ghcr.io/rustcfml/rustcfml
 ```
 
 nginx takes the published port and reaches the engine over a Unix socket at
@@ -121,7 +154,7 @@ from these locations in order, first hit per name:
 
 1. `RUSTCFML_EXTENSIONS` (`--extensions`)
 2. `extensions.directory` in the server `.cfconfig.json`
-3. `/app/extensions/` (the webroot) — the usual place, checked into the app
+3. `/srv/app/extensions/` (the webroot) — the usual place, checked into the app
 4. `/home/nonroot/.rustcfml/extensions/`
 5. `/opt/rustcfml/extensions/` — beside the binary, for extensions baked into a derived image
 
@@ -133,7 +166,7 @@ another engine ABI:
 
 ```
 rustcfml: extensions — 1 .rcx found, 1 loaded, 0 problem(s)
-  Loaded extension pdf 0.3.0 (14 bif(s), 2 class(es), 0 sql fn(s)) from /app/extensions/pdf-0.3.0.rcx
+  Loaded extension pdf 0.3.0 (14 bif(s), 2 class(es), 0 sql fn(s)) from /srv/app/extensions/pdf-0.3.0.rcx
 ```
 
 A published extension ships one archive per platform; for this image take the
@@ -148,10 +181,10 @@ which case one file serves both architectures of the image). See
 | Base | `cgr.dev/chainguard/wolfi-base` (glibc, apk, busybox shell) + `tzdata`, `curl`, `ca-certificates` |
 | Engine | The PGO-built binary from the matching [RustCFML GitHub release](https://github.com/RustCFML/RustCFML/releases), at `/opt/rustcfml/rustcfml` and on `PATH` |
 | Notices | `/opt/rustcfml/LICENSE`, `/opt/rustcfml/THIRD-PARTY.txt`, `/opt/rustcfml/VERSION`; also `rustcfml --licenses` |
-| User | `nonroot` (uid 65532). `/app`, `/opt/rustcfml/extensions` and `/home/nonroot` are writable by it |
+| User | `nonroot` (uid 65532). `/srv/app`, `/opt/rustcfml/extensions` and `/home/nonroot` are writable by it |
 | Signals | From v0.653.14 the engine drains in-flight requests and exits on SIGTERM or SIGINT, so `docker stop` returns as soon as the last request finishes. `STOPSIGNAL SIGINT` is kept only so that pinning an older engine (which ignored SIGTERM as PID 1, costing a 10 s wait then SIGKILL) still stops cleanly |
 | Health | `HEALTHCHECK` every 30 s against the port (see `RUSTCFML_HEALTHCHECK_PATH`); skipped in socket mode |
-| Logs | Engine output on stdout/stderr. `<cflog>`/`writeLog()` files go to `/app/logs/` unless `logging.logsDirectory` is set in `.cfconfig.json` |
+| Logs | Engine output on stdout/stderr. `<cflog>`/`writeLog()` files go to `/srv/app/logs/` unless `logging.logsDirectory` is set in `.cfconfig.json` |
 | Smoke | Every build runs the engine inside the runtime image on each platform and refuses to publish if it does not (`/opt/rustcfml/smoke.txt`) |
 
 Nothing is compiled in this repository. The Dockerfile downloads the release

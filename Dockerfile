@@ -2,13 +2,13 @@
 #
 # RustCFML — reference container image.
 #
-#   docker run --rm -p 8500:8500 -v "$PWD/webroot:/app" ghcr.io/rustcfml/rustcfml
+#   docker run --rm -p 8500:8500 -v "$PWD/webroot:/srv/app" ghcr.io/rustcfml/rustcfml
 #
 # or as a base image for an application:
 #
 #   FROM ghcr.io/rustcfml/rustcfml:v0.653.3
-#   COPY webroot/ /app/
-#   RUN rustcfml-warm-extensions      # only if /app/extensions/ holds .rcx files
+#   COPY webroot/ /srv/app/
+#   RUN rustcfml-warm-extensions      # only if /srv/app/extensions/ holds .rcx files
 #
 # Multi-arch (linux/amd64, linux/arm64). Nothing is compiled here: each
 # platform's stage downloads the matching PGO'd binary from the RustCFML GitHub
@@ -18,7 +18,10 @@
 #   /opt/rustcfml/rustcfml          the engine (also on PATH as `rustcfml`)
 #   /opt/rustcfml/extensions/       image-level .rcx extensions (search location 5)
 #   /opt/rustcfml/LICENSE, THIRD-PARTY.txt, VERSION
-#   /app                            the webroot (search location 3 is /app/extensions/)
+#   /srv/app                        the webroot (search location 3 is /srv/app/extensions/)
+#                                   Not /app: that is ColdBox's default appMapping name,
+#                                   and a mapping shadows the real directory in path
+#                                   lookups. See docker/resolve-webroot.sh.
 #   /home/nonroot/.rustcfml/        per-user extensions/ and the ext-cache/ the
 #                                   loader extracts libraries into
 #
@@ -76,16 +79,22 @@ COPY --from=fetch /out/rustcfml /out/LICENSE /out/THIRD-PARTY.txt /out/VERSION /
 COPY docker/entrypoint.sh            /usr/local/bin/rustcfml-entrypoint
 COPY docker/warm-extensions.sh       /usr/local/bin/rustcfml-warm-extensions
 COPY docker/healthcheck.sh           /usr/local/bin/rustcfml-healthcheck
+COPY docker/resolve-webroot.sh       /usr/local/bin/rustcfml-webroot
 COPY docker/nginx.conf               /etc/nginx/nginx.conf
 
-# /app is the webroot. /opt/rustcfml/extensions is the image-level extension
+# /srv/app is the webroot. /opt/rustcfml/extensions is the image-level extension
 # directory (searched last). Both, plus the nonroot home (where the loader's
 # ext-cache lives), are owned by the runtime user so extensions can be warmed
 # and logs written without root.
+#
+# /app is deliberately NOT created here. rustcfml-webroot falls back to it when
+# it has content, which is how images and compose files written against the old
+# default keep working; an empty /app baked into the image would make that
+# check fire on every start.
 RUN ln -s /opt/rustcfml/rustcfml /usr/local/bin/rustcfml \
-    && chmod 0755 /usr/local/bin/rustcfml-entrypoint /usr/local/bin/rustcfml-warm-extensions /usr/local/bin/rustcfml-healthcheck \
-    && mkdir -p /app /opt/rustcfml/extensions /home/nonroot/.rustcfml/extensions /home/nonroot/.rustcfml/ext-cache \
-    && chown -R nonroot:nonroot /app /opt/rustcfml/extensions /home/nonroot \
+    && chmod 0755 /usr/local/bin/rustcfml-entrypoint /usr/local/bin/rustcfml-warm-extensions /usr/local/bin/rustcfml-healthcheck /usr/local/bin/rustcfml-webroot \
+    && mkdir -p /srv/app /opt/rustcfml/extensions /home/nonroot/.rustcfml/extensions /home/nonroot/.rustcfml/ext-cache \
+    && chown -R nonroot:nonroot /srv/app /opt/rustcfml/extensions /home/nonroot \
     && chown -R nonroot:nonroot /var/lib/nginx /run \
     && rustcfml --version
 
@@ -100,14 +109,18 @@ USER nonroot
 # configuration. It reads the cgroup limit at startup and installs no limit at
 # all when there is none, so it is safe in an unconstrained container too.
 # Set it to an explicit size to override, or to an empty string to disable.
+#
+# RUSTCFML_WEBROOT is deliberately NOT set here. The effective default is
+# /srv/app, but it is resolved at start by rustcfml-webroot, which falls back to
+# /app when that is where the app was mounted. Baking the variable in would make
+# it always set, and that fallback could never fire.
 ENV HOME=/home/nonroot \
     RUSTCFML_MODE=production \
-    RUSTCFML_WEBROOT=/app \
     RUSTCFML_PORT=8500 \
     RUSTCFML_MAX_MEMORY=auto \
     RUSTCFML_PROXY=none
 
-WORKDIR /app
+WORKDIR /srv/app
 EXPOSE 8500
 
 # Kept for engines older than v0.653.14, which handled only SIGINT. As PID 1 the

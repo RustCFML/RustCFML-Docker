@@ -10,7 +10,7 @@ build-all:        ## both arches (no load; proves the multi-platform build)
 	docker buildx build --platform linux/amd64,linux/arm64 --build-arg RUSTCFML_VERSION=$(VERSION) -t $(IMAGE) .
 
 run: build        ## serve examples/hello on http://localhost:8500
-	docker run --rm -p 8500:8500 -v "$(PWD)/examples/hello/webroot:/app" $(IMAGE)
+	docker run --rm -p 8500:8500 -v "$(PWD)/examples/hello/webroot:/srv/app" $(IMAGE)
 
 smoke: build      ## version, extension listing, one request
 	docker run --rm $(IMAGE) --version

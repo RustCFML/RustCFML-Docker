@@ -6,7 +6,7 @@ services:
     ports:
       - "8500:8500"
     volumes:
-      - ./examples/hello/webroot:/app
+      - ./examples/hello/webroot:/srv/app
     environment:
       RUSTCFML_MODE: dev            # production (default) caches everything until restart
       # RUSTCFML_MAX_MEMORY: auto   # 503 + Retry-After above 85% of the cgroup limit

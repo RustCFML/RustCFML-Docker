@@ -6,7 +6,8 @@
 # stop signal reaches it directly and it drains in-flight requests before exiting.
 #
 #   RUSTCFML_MODE        production (default) | dev
-#   RUSTCFML_WEBROOT     /app
+#   RUSTCFML_WEBROOT     /srv/app          (falls back to /app when that is where
+#                                          the app is mounted — see rustcfml-webroot)
 #   RUSTCFML_PORT        8500              TCP port (ignored when a socket is set)
 #   RUSTCFML_PROXY       none              none | nginx — front the engine with nginx,
 #                                          which reaches it over a unix socket
@@ -27,7 +28,7 @@
 set -eu
 
 MODE="${RUSTCFML_MODE:-production}"
-WEBROOT="${RUSTCFML_WEBROOT:-/app}"
+WEBROOT="$(/usr/local/bin/rustcfml-webroot)"
 PORT="${RUSTCFML_PORT:-8500}"
 PROXY="${RUSTCFML_PROXY:-none}"
 
@@ -66,7 +67,7 @@ fi
 # Native extensions: find them, load them once, fail loudly if one is broken.
 # Same search order as the engine; the warm step extracts each library into
 # $HOME/.rustcfml/ext-cache so the server's own start does not pay for it.
-/usr/local/bin/rustcfml-warm-extensions
+RUSTCFML_WEBROOT="$WEBROOT" /usr/local/bin/rustcfml-warm-extensions
 
 set -- "$@"
 case "$MODE" in

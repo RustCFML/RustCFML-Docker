@@ -4,7 +4,7 @@
 # The engine loads extensions once per process from, in order:
 #   1. $RUSTCFML_EXTENSIONS (--extensions)
 #   2. extensions.directory in the server .cfconfig.json
-#   3. $RUSTCFML_WEBROOT/extensions/
+#   3. $RUSTCFML_WEBROOT/extensions/     (default webroot /srv/app)
 #   4. $HOME/.rustcfml/extensions/
 #   5. /opt/rustcfml/extensions/          (beside the binary)
 # On first load each archive's library for this platform is extracted into
@@ -19,7 +19,7 @@
 #   RUSTCFML_EXTENSIONS_STRICT=0            report problems and continue
 set -eu
 
-WEBROOT="${RUSTCFML_WEBROOT:-/app}"
+WEBROOT="$(/usr/local/bin/rustcfml-webroot)"
 STRICT="${RUSTCFML_EXTENSIONS_STRICT:-1}"
 BIN_DIR="$(dirname "$(readlink -f "$(command -v rustcfml)")")"
 
