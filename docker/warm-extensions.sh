@@ -37,12 +37,25 @@ if [ "$found" -eq 0 ] && [ -z "${CFCONFIG:-}" ] && [ ! -f "$WEBROOT/.cfconfig.js
   exit 0
 fi
 
-set -- --verbose -c 'writeOutput("")'
+# The probe is an empty template in a scratch directory, not inline code run in
+# the webroot: inline code there runs the app's Application.cfc (onApplicationStart,
+# then onRequest with no page), so every container start would boot the app once
+# against its database and could log an error. The engine's application directory
+# is the template's, so the webroot's extensions/ is linked into the scratch
+# directory to keep it in the search; the cwd stays the webroot, so the server
+# .cfconfig.json (and its extensions.directory) is found exactly as the server finds it.
+probe="$(mktemp -d)"
+trap 'rm -rf "$probe"' EXIT
+: > "$probe/probe.cfm"
+[ -d "$WEBROOT/extensions" ] && ln -s "$WEBROOT/extensions" "$probe/extensions"
+
+set -- --verbose "$probe/probe.cfm"
 [ -n "${RUSTCFML_EXTENSIONS:-}" ] && set -- --extensions "$RUSTCFML_EXTENSIONS" "$@"
 
 # One engine start in CLI mode walks the exact loader the server uses; verbose
-# prints "Loaded extension …" per success and "…warning…" per problem.
-out="$(cd "$WEBROOT" && rustcfml "$@" 2>&1 | grep -v '^\[.*\] DEBUG ' || true)"
+# prints "Loaded extension …" per success and "…warning…" per problem (with the
+# scratch link's paths reported as the webroot's).
+out="$(cd "$WEBROOT" && rustcfml "$@" 2>&1 | grep -v '^\[.*\] DEBUG ' | sed "s|$probe/extensions/|$WEBROOT/extensions/|g" || true)"
 
 loaded="$(printf '%s\n' "$out" | grep -c '^Loaded extension ' || true)"
 problems="$(printf '%s\n' "$out" | grep -i -c 'warning' || true)"

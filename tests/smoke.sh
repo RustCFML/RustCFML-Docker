@@ -104,6 +104,22 @@ curl -s "http://127.0.0.1:$PORT/index.cfm" | grep -q "Hello from RustCFML" || fa
 docker rm -f "$cid" >/dev/null; trap - EXIT
 rm -rf "$tmp"
 
+echo "--- the extension check does not start the application"
+# The check runs before the server, at every container start. Booting the app's
+# Application.cfc there would open its database and fire its handlers with no page.
+tmp=$(mktemp -d)
+echo '{}' > "$tmp/.cfconfig.json"
+cat > "$tmp/Application.cfc" <<'CFC'
+<cfcomponent>
+  <cfset this.name = "smoke_no_boot" />
+  <cffunction name="onApplicationStart"><cfset fileWrite("/tmp/app-started", "x") /><cfreturn true /></cffunction>
+</cfcomponent>
+CFC
+docker run --rm --entrypoint sh -v "$tmp:/srv/app:ro" "$IMAGE" \
+  -c 'rustcfml-warm-extensions && test ! -e /tmp/app-started' \
+  || fail "the extension check ran the application's onApplicationStart"
+rm -rf "$tmp"
+
 if [ -n "${SMOKE_RCX:-}" ]; then
   echo "--- real extension: $SMOKE_RCX"
   tmp=$(mktemp -d); mkdir -p "$tmp/extensions"; cp "$SMOKE_RCX" "$tmp/extensions/"
