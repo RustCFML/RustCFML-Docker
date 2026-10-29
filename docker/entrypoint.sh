@@ -13,6 +13,10 @@
 #                                          which reaches it over a unix socket
 #   RUSTCFML_SOCKET      unset             bind a Unix socket at this path instead
 #   RUSTCFML_MAX_MEMORY  auto              75% of the cgroup limit; or 1.5G, 1536M, "" to disable
+#   RUSTCFML_BYTECODE_CACHE  /home/nonroot/.rustcfml/bytecode-cache
+#                                          persistent bytecode cache (--bytecode-cache);
+#                                          fill it at build time with rustcfml-warm-bytecode;
+#                                          "" to disable
 #   RUSTCFML_EXTENSIONS  unset             extra .rcx directory (--extensions)
 #   RUSTCFML_EXTENSIONS_STRICT  1          refuse to start if an extension fails to load
 #   RUSTCFML_SINGLE_THREADED    unset      set to 1 for --single-threaded
@@ -88,6 +92,16 @@ fi
 [ -n "${RUSTCFML_EXTENSIONS:-}" ]        && set -- --extensions "$RUSTCFML_EXTENSIONS" "$@"
 [ "${RUSTCFML_SINGLE_THREADED:-0}" = 1 ] && set -- --single-threaded "$@"
 # RUSTCFML_MAX_MEMORY and CFCONFIG are read by the engine itself.
+
+# Persistent bytecode cache. Entries are keyed by the docroot path as spelled on
+# the command line, so "$WEBROOT" here must be the same string
+# rustcfml-warm-bytecode passed to --warm; both take it from rustcfml-webroot and
+# run from the same directory. Engines before v0.743.0 have no such flag: the
+# cache is simply not used there, so pinning an older engine still starts.
+BYTECODE_CACHE="${RUSTCFML_BYTECODE_CACHE-/home/nonroot/.rustcfml/bytecode-cache}"
+if [ -n "$BYTECODE_CACHE" ] && rustcfml --help 2>/dev/null | grep -q -- '--bytecode-cache'; then
+  set -- --bytecode-cache "$BYTECODE_CACHE" "$@"
+fi
 
 cd "$WEBROOT"
 

@@ -30,13 +30,23 @@ Or with compose, see [`docker-compose.yml`](docker-compose.yml): `docker compose
 ## Use it as a base image
 
 ```dockerfile
-FROM ghcr.io/rustcfml/rustcfml:v0.653.3
+FROM ghcr.io/rustcfml/rustcfml:v0.743.0
 COPY --chown=nonroot:nonroot webroot/ /srv/app/
+RUN rustcfml-warm-bytecode
 ```
 
-If the app ships native extensions in `/srv/app/extensions/`, warm them at build
-time so the first container start does not pay for extracting them, and so a
-broken or wrong-platform archive fails the *build* rather than the deploy:
+`rustcfml-warm-bytecode` compiles every `.cfm`/`.cfc` under the webroot into
+the image's [bytecode cache](#bytecode-cache), so a container starts with the
+whole application already compiled: nothing is parsed at start-up or on the
+first request to each page. It needs engine v0.743.0 or later; on an older
+engine it says so and does nothing, so the line is safe to keep when pinning
+back. A template that does not compile is reported and skipped (it would fail
+the same way at request time); a webroot with no CFML in it at all fails the
+build, because that is a `COPY` to the wrong place.
+
+If the app ships native extensions in `/srv/app/extensions/`, warm those too, so
+the first container start does not pay for extracting them, and so a broken or
+wrong-platform archive fails the *build* rather than the deploy:
 
 ```dockerfile
 RUN rustcfml-warm-extensions
@@ -68,6 +78,7 @@ docker run --rm -p 8500:8500 -v "$PWD:/srv/app" ghcr.io/rustcfml/rustcfml --verb
 | `RUSTCFML_PORT` | `8500` | TCP port |
 | `RUSTCFML_SOCKET` | unset | Bind a Unix socket at this path instead of a TCP port (for a proxy in a *separate* container). Must be a path the `nonroot` user can create, e.g. `/tmp/rustcfml.sock`. Cannot be combined with `RUSTCFML_PROXY=nginx` |
 | `RUSTCFML_PROXY` | `none` | `nginx` runs nginx in front of the engine inside this container, reaching it over a Unix socket. See [Fronting with nginx](#fronting-with-nginx) |
+| `RUSTCFML_BYTECODE_CACHE` | `/home/nonroot/.rustcfml/bytecode-cache` | Persistent bytecode cache directory (`--bytecode-cache`, engine >= v0.743.0; ignored on older engines). Fill it at build time with `rustcfml-warm-bytecode` — see [Bytecode cache](#bytecode-cache). Empty to disable |
 | `RUSTCFML_MAX_MEMORY` | `auto` | Process memory limit: `auto` (75% of the cgroup limit), or an explicit `1.5G` / `1536M`; empty to disable. Above 85% new requests get 503 + Retry-After while the process sheds; above 95% the in-flight request that has allocated the most is aborted, so one runaway cannot OOM the container |
 | `RUSTCFML_EXTENSIONS` | unset | Extra `.rcx` directory, searched first |
 | `RUSTCFML_EXTENSIONS_STRICT` | `1` | Refuse to start if any extension fails to load (exit 78). `0` logs and continues |
@@ -174,6 +185,32 @@ A published extension ships one archive per platform; for this image take the
 which case one file serves both architectures of the image). See
 [docs/extensions.md](https://github.com/RustCFML/RustCFML/blob/main/docs/extensions.md).
 
+## Bytecode cache
+
+The engine normally compiles each template on its first hit after a process
+start. From v0.743.0 it can keep the compiled bytecode on disk: the server
+reads entries from `RUSTCFML_BYTECODE_CACHE` and writes the ones it compiles
+itself, so a restarted container does not recompile, and a container built
+with `RUN rustcfml-warm-bytecode` never compiles the application at all.
+
+An entry is keyed by the template's content, the engine version and the docroot
+path *as spelled on the command line*. Both `rustcfml-warm-bytecode` and the
+entrypoint take that path from the same resolver and run from the same
+directory, so the warmed entries are the ones the server looks up; a relative
+`RUSTCFML_WEBROOT` works as long as it is the same at build and at start. A
+changed file is a new entry (timestamps do not matter across `COPY` layers), an
+engine upgrade misses cleanly and recompiles, and a corrupt entry is caught by
+checksum. Stale entries are not pruned; the directory is small, and rebuilding
+the image starts it fresh.
+
+The directory is under `$HOME` so that a derived image's `RUN` lands in a layer
+the server reads, and it is owned by `nonroot` only: **the cache is executed as
+code**, so anything that can write to it runs CFML in the server. A read-only
+container is fine (reads work, writes are skipped). To persist compilations
+across container recreation without baking them in, mount a volume at the
+cache path; to turn the cache off, set `RUSTCFML_BYTECODE_CACHE` to an empty
+string.
+
 ## What is in the image
 
 | | |
@@ -181,7 +218,7 @@ which case one file serves both architectures of the image). See
 | Base | `cgr.dev/chainguard/wolfi-base` (glibc, apk, busybox shell) + `tzdata`, `curl`, `ca-certificates` |
 | Engine | The PGO-built binary from the matching [RustCFML GitHub release](https://github.com/RustCFML/RustCFML/releases), at `/opt/rustcfml/rustcfml` and on `PATH` |
 | Notices | `/opt/rustcfml/LICENSE`, `/opt/rustcfml/THIRD-PARTY.txt`, `/opt/rustcfml/VERSION`; also `rustcfml --licenses` |
-| User | `nonroot` (uid 65532). `/srv/app`, `/opt/rustcfml/extensions` and `/home/nonroot` are writable by it |
+| User | `nonroot` (uid 65532). `/srv/app`, `/opt/rustcfml/extensions` and `/home/nonroot` (extension cache, bytecode cache) are writable by it |
 | Signals | From v0.653.14 the engine drains in-flight requests and exits on SIGTERM or SIGINT, so `docker stop` returns as soon as the last request finishes. `STOPSIGNAL SIGINT` is kept only so that pinning an older engine (which ignored SIGTERM as PID 1, costing a 10 s wait then SIGKILL) still stops cleanly |
 | Health | `HEALTHCHECK` every 30 s against the port (see `RUSTCFML_HEALTHCHECK_PATH`); skipped in socket mode |
 | Logs | Engine output on stdout/stderr. `<cflog>`/`writeLog()` files go to `/srv/app/logs/` unless `logging.logsDirectory` is set in `.cfconfig.json` |
@@ -258,7 +295,8 @@ try a release before tagging.
 
 ```sh
 make build              # native arch -> rustcfml:local
-make smoke              # version, ext list, serve + request, SIGINT stop, broken-extension handling
+make smoke              # version, ext list, serve + request, both stop signals, nginx front,
+                        # extension check (no app boot, broken .rcx, read-only), bytecode cache
 make build-all          # both platforms, proves the multi-arch build
 make run                # serve examples/hello on :8500
 ```

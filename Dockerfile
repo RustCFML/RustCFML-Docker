@@ -6,8 +6,9 @@
 #
 # or as a base image for an application:
 #
-#   FROM ghcr.io/rustcfml/rustcfml:v0.653.3
-#   COPY webroot/ /srv/app/
+#   FROM ghcr.io/rustcfml/rustcfml:v0.743.0
+#   COPY --chown=nonroot:nonroot webroot/ /srv/app/
+#   RUN rustcfml-warm-bytecode        # compile the app into the image (engine >= v0.743.0)
 #   RUN rustcfml-warm-extensions      # only if /srv/app/extensions/ holds .rcx files
 #
 # Multi-arch (linux/amd64, linux/arm64). Nothing is compiled here: each
@@ -22,8 +23,10 @@
 #                                   Not /app: that is ColdBox's default appMapping name,
 #                                   and a mapping shadows the real directory in path
 #                                   lookups. See docker/resolve-webroot.sh.
-#   /home/nonroot/.rustcfml/        per-user extensions/ and the ext-cache/ the
-#                                   loader extracts libraries into
+#   /home/nonroot/.rustcfml/        per-user extensions/, the ext-cache/ the
+#                                   loader extracts libraries into, and the
+#                                   bytecode-cache/ the server reads compiled
+#                                   templates from (RUSTCFML_BYTECODE_CACHE)
 #
 # See README.md for every environment variable the entrypoint understands.
 
@@ -78,6 +81,7 @@ RUN apk add --no-cache tzdata curl nginx \
 COPY --from=fetch /out/rustcfml /out/LICENSE /out/THIRD-PARTY.txt /out/VERSION /opt/rustcfml/
 COPY docker/entrypoint.sh            /usr/local/bin/rustcfml-entrypoint
 COPY docker/warm-extensions.sh       /usr/local/bin/rustcfml-warm-extensions
+COPY docker/warm-bytecode.sh         /usr/local/bin/rustcfml-warm-bytecode
 COPY docker/healthcheck.sh           /usr/local/bin/rustcfml-healthcheck
 COPY docker/resolve-webroot.sh       /usr/local/bin/rustcfml-webroot
 COPY docker/nginx.conf               /etc/nginx/nginx.conf
@@ -92,17 +96,23 @@ COPY docker/nginx.conf               /etc/nginx/nginx.conf
 # default keep working; an empty /app baked into the image would make that
 # check fire on every start.
 RUN ln -s /opt/rustcfml/rustcfml /usr/local/bin/rustcfml \
-    && chmod 0755 /usr/local/bin/rustcfml-entrypoint /usr/local/bin/rustcfml-warm-extensions /usr/local/bin/rustcfml-healthcheck /usr/local/bin/rustcfml-webroot \
-    && mkdir -p /srv/app /opt/rustcfml/extensions /home/nonroot/.rustcfml/extensions /home/nonroot/.rustcfml/ext-cache \
+    && chmod 0755 /usr/local/bin/rustcfml-entrypoint /usr/local/bin/rustcfml-warm-extensions /usr/local/bin/rustcfml-warm-bytecode /usr/local/bin/rustcfml-healthcheck /usr/local/bin/rustcfml-webroot \
+    && mkdir -p /srv/app /opt/rustcfml/extensions /home/nonroot/.rustcfml/extensions /home/nonroot/.rustcfml/ext-cache /home/nonroot/.rustcfml/bytecode-cache \
     && chown -R nonroot:nonroot /srv/app /opt/rustcfml/extensions /home/nonroot \
     && chown -R nonroot:nonroot /var/lib/nginx /run \
     && rustcfml --version
 
 USER nonroot
 # HOME must be fixed and writable: the extension loader extracts each .rcx's
-# library into $HOME/.rustcfml/ext-cache/<sha256>/ on first load. Warming at
-# image build time (rustcfml-warm-extensions) only helps if the runtime sees the
-# same HOME.
+# library into $HOME/.rustcfml/ext-cache/<sha256>/ on first load, and the
+# persistent bytecode cache lives in $HOME/.rustcfml/bytecode-cache/. Warming at
+# image build time (rustcfml-warm-extensions, rustcfml-warm-bytecode) only helps
+# if the runtime sees the same HOME.
+# RUSTCFML_BYTECODE_CACHE: the server reads compiled templates from here and
+# writes the ones it compiles itself (engine >= v0.743.0; older engines ignore
+# it). Under $HOME so that a derived image's `RUN rustcfml-warm-bytecode` lands
+# in a layer the server reads, and owned by nonroot only, because the directory
+# is executed as code. Set it to an empty string to disable the cache.
 # RUSTCFML_MAX_MEMORY=auto gives the process a ceiling of 75% of the container's
 # cgroup limit, so `docker run -m 2g` is enough to get back-pressure (503 above
 # 85% of it) and the runaway-request abort (above 95%) with no other
@@ -118,6 +128,7 @@ ENV HOME=/home/nonroot \
     RUSTCFML_MODE=production \
     RUSTCFML_PORT=8500 \
     RUSTCFML_MAX_MEMORY=auto \
+    RUSTCFML_BYTECODE_CACHE=/home/nonroot/.rustcfml/bytecode-cache \
     RUSTCFML_PROXY=none
 
 WORKDIR /srv/app
@@ -139,7 +150,8 @@ ENTRYPOINT ["/usr/local/bin/rustcfml-entrypoint"]
 # ---------------------------------------------------------------------------
 # Stage 3: smoke test. Runs the engine inside the runtime image on this
 # platform (under QEMU for the non-native one), exercises the extension probe
-# with no extensions present, and copies a marker into the final stage so the
+# with no extensions present and the bytecode warm step (a no-op that says so on
+# engines without the cache), and copies a marker into the final stage so the
 # build cannot succeed without it.
 # ---------------------------------------------------------------------------
 FROM runtime AS smoke
@@ -148,6 +160,7 @@ RUN cd /smoke/webroot \
     && rustcfml index.cfm | tee /tmp/smoke.log \
     && grep -q "RustCFML" /tmp/smoke.log \
     && RUSTCFML_WEBROOT=/smoke/webroot rustcfml-warm-extensions \
+    && RUSTCFML_WEBROOT=/smoke/webroot rustcfml-warm-bytecode \
     && printf 'engine %s\n' "$(rustcfml --version)" > /tmp/smoke.ok
 
 FROM runtime

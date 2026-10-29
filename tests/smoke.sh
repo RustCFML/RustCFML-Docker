@@ -157,6 +157,89 @@ docker run --rm --read-only --entrypoint sh -v "$tmp:/srv/app:ro" "$IMAGE" -c 'r
   || fail "the extension check failed in a read-only container"
 rm -rf "$tmp"
 
+# Persistent bytecode cache (engine >= v0.743.0). Entries are keyed by content
+# and by the docroot path as spelled on the command line, so the checks here
+# are about the SPELLING matching between the warm step and the server, and
+# about the derived-image flow landing the cache where the server reads it.
+# "Hit" is observed from outside: a served request that was warmed adds no
+# entry to the cache directory; a miss compiles and adds one.
+entries() { docker run --rm --entrypoint sh "$@" -c 'find "${RUSTCFML_BYTECODE_CACHE:-/home/nonroot/.rustcfml/bytecode-cache}" -type f 2>/dev/null | wc -l' | tr -d ' '; }
+if docker run --rm "$IMAGE" --help 2>/dev/null | grep -q -- '--bytecode-cache'; then
+  echo "--- the server passes the bytecode cache, and an empty RUSTCFML_BYTECODE_CACHE disables it"
+  cid=$(docker run -d --rm -v "$HERE/examples/hello/webroot:/srv/app:ro" "$IMAGE")
+  trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+  sleep 1
+  docker exec "$cid" sh -c "tr '\\0' ' ' < /proc/1/cmdline" | grep -q -- '--bytecode-cache /home/nonroot/.rustcfml/bytecode-cache' \
+    || fail "server was not started with --bytecode-cache"
+  docker rm -f "$cid" >/dev/null; trap - EXIT
+  cid=$(docker run -d --rm -v "$HERE/examples/hello/webroot:/srv/app:ro" -e RUSTCFML_BYTECODE_CACHE= "$IMAGE")
+  trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+  sleep 1
+  docker exec "$cid" sh -c "tr '\\0' ' ' < /proc/1/cmdline" | grep -q -- '--bytecode-cache' \
+    && fail "RUSTCFML_BYTECODE_CACHE= did not disable the cache"
+  docker rm -f "$cid" >/dev/null; trap - EXIT
+  docker run --rm --entrypoint sh -e RUSTCFML_BYTECODE_CACHE= "$IMAGE" -c 'rustcfml-warm-bytecode' | grep -q 'disabled' \
+    || fail "rustcfml-warm-bytecode did not report the cache as disabled"
+
+  echo "--- derived image: RUN rustcfml-warm-bytecode bakes the cache, the server hits it"
+  tmp=$(mktemp -d)
+  cp -R "$HERE/examples/hello/webroot" "$tmp/webroot"
+  printf '<cfscript>\nx = [1, 2;\n</cfscript>\n' > "$tmp/webroot/broken.cfm"   # a parse error: reported, not fatal
+  cat > "$tmp/Dockerfile" <<EOD
+FROM $IMAGE
+COPY --chown=nonroot:nonroot webroot/ /srv/app/
+RUN rustcfml-warm-bytecode
+EOD
+  out=$(docker build -q -t rustcfml-smoke-derived "$tmp" 2>&1) || { echo "$out"; fail "derived image with rustcfml-warm-bytecode did not build"; }
+  docker run --rm --entrypoint rustcfml-warm-bytecode rustcfml-smoke-derived 2>&1 | grep -q 'Failed to compile /srv/app/broken.cfm' \
+    || fail "the broken template was not reported"
+  before=$(entries rustcfml-smoke-derived)
+  [ "$before" -ge 1 ] || fail "derived image has no cache entries after warming"
+  cid=$(docker run -d --rm -p "$PORT:8500" rustcfml-smoke-derived)
+  trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+  for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$PORT/index.cfm" && break; sleep 0.25; done
+  curl -s "http://127.0.0.1:$PORT/index.cfm" | grep -q "Hello from RustCFML" || fail "derived image did not serve"
+  after=$(docker exec "$cid" sh -c 'find /home/nonroot/.rustcfml/bytecode-cache -type f | wc -l' | tr -d ' ')
+  echo "cache entries: $before after warm, $after after a request"
+  [ "$before" = "$after" ] || fail "the served request compiled again: the warm step's docroot spelling does not match the server's"
+  docker rm -f "$cid" >/dev/null; trap - EXIT
+  docker rmi -f rustcfml-smoke-derived >/dev/null; rm -rf "$tmp"
+
+  echo "--- ... and with a relative RUSTCFML_WEBROOT, warmed and served the same way"
+  cache=$(mktemp -d); chmod 0777 "$cache"
+  docker run --rm --entrypoint rustcfml-warm-bytecode -w /srv/app -e RUSTCFML_WEBROOT=. \
+    -v "$HERE/examples/hello/webroot:/srv/app:ro" -v "$cache:/home/nonroot/.rustcfml/bytecode-cache" "$IMAGE" >/dev/null \
+    || fail "warm from a relative webroot failed"
+  before=$(find "$cache" -type f | wc -l | tr -d ' ')
+  cid=$(docker run -d --rm -p "$PORT:8500" -w /srv/app -e RUSTCFML_WEBROOT=. \
+    -v "$HERE/examples/hello/webroot:/srv/app:ro" -v "$cache:/home/nonroot/.rustcfml/bytecode-cache" "$IMAGE")
+  trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+  for i in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$PORT/index.cfm" && break; sleep 0.25; done
+  curl -s "http://127.0.0.1:$PORT/index.cfm" | grep -q "Hello from RustCFML" || fail "relative webroot did not serve"
+  after=$(find "$cache" -type f | wc -l | tr -d ' ')
+  echo "cache entries: $before after warm, $after after a request"
+  [ "$before" = "$after" ] || fail "relative webroot: the served request compiled again"
+  docker rm -f "$cid" >/dev/null; trap - EXIT; rm -rf "$cache"
+
+  echo "--- a webroot with nothing to compile fails the warm step"
+  tmp=$(mktemp -d); echo hi > "$tmp/readme.txt"
+  set +e
+  docker run --rm --entrypoint rustcfml-warm-bytecode -v "$tmp:/srv/app:ro" "$IMAGE" >/dev/null 2>&1; rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "warming a webroot with no CFML succeeded"
+  rm -rf "$tmp"
+else
+  echo "--- engine has no --bytecode-cache: the warm step is a reported no-op"
+  docker run --rm --entrypoint rustcfml-warm-bytecode -v "$HERE/examples/hello/webroot:/srv/app:ro" "$IMAGE" 2>&1 | grep -q 'nothing warmed' \
+    || fail "rustcfml-warm-bytecode did not report the missing engine support"
+  cid=$(docker run -d --rm -v "$HERE/examples/hello/webroot:/srv/app:ro" "$IMAGE")
+  trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+  sleep 1
+  docker exec "$cid" sh -c "tr '\\0' ' ' < /proc/1/cmdline" | grep -q -- '--bytecode-cache' \
+    && fail "an engine without --bytecode-cache was started with it"
+  docker rm -f "$cid" >/dev/null; trap - EXIT
+fi
+
 if [ -n "${SMOKE_RCX:-}" ]; then
   echo "--- real extension: $SMOKE_RCX"
   tmp=$(mktemp -d); mkdir -p "$tmp/extensions"; cp "$SMOKE_RCX" "$tmp/extensions/"
