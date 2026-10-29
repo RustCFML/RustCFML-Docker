@@ -84,12 +84,49 @@ docker run --rm -p 8500:8500 -v "$PWD:/srv/app" ghcr.io/rustcfml/rustcfml --verb
 | `RUSTCFML_EXTENSIONS_STRICT` | `1` | Refuse to start if any extension fails to load (exit 78). `0` logs and continues |
 | `RUSTCFML_SINGLE_THREADED` | unset | `1` for a single-threaded runtime (lower memory, lower concurrency) |
 | `RUSTCFML_HEALTHCHECK_PATH` | unset | Path the `HEALTHCHECK` must get a 2xx/3xx from. Unset, any HTTP answer on the port counts |
-| `CFCONFIG` | unset | Explicit server-level `.cfconfig.json`. Without it the engine looks in the webroot, then the working directory, then beside the binary |
+| `CFCONFIG` | unset | Explicit server-level `.cfconfig.json`. Without it the engine looks in the webroot, then the working directory, then beside the binary. A `.cfconfig.json` beside the app's `Application.cfc` is the *application-level* file and overlays the server-level one either way — see [Configuration file](#configuration-file) |
 
 Datasources, mappings, logging and other engine settings go in a
 [`.cfconfig.json`](https://github.com/RustCFML/RustCFML/blob/main/docs/configuration.md)
 in the webroot. Application-level files beside an `Application.cfc` overlay the
 server baseline.
+
+### Configuration file
+
+The engine reads [`.cfconfig.json`](https://github.com/RustCFML/RustCFML/blob/main/docs/configuration.md)
+in two tiers, and both apply in the container: a **server-level** file (`CFCONFIG`,
+or found in the webroot / working directory / beside the binary) is the baseline,
+and a `.cfconfig.json` sitting **beside the app's `Application.cfc`** overlays it
+for that application. So an app that ships its own `.cfconfig.json` keeps its
+datasource settings even when you pass a different file through `CFCONFIG`: the
+app's file wins for the keys it sets. In particular, a datasource host of
+`localhost` in the app's file means the *container's* localhost, where nothing
+listens.
+
+Put the per-environment values in the app's file as `${VAR:default}`
+placeholders and pass them to the container instead:
+
+```json
+"datasources": {
+  "preside": {
+    "host":     "${DB_HOST:localhost}",
+    "port":     "${DB_PORT:3306}",
+    "username": "${DB_USER:root}",
+    "password": "${DB_PASSWORD}",
+    "database": "${DB_NAME:preside}",
+    "dbdriver": "mysql"
+  }
+}
+```
+
+```sh
+docker run -e DB_HOST=host.docker.internal -e DB_PASSWORD=... -v "$PWD:/srv/app" ghcr.io/rustcfml/rustcfml
+```
+
+The placeholders are Lucee's own `.CFConfig.json` syntax, so the same file
+works unchanged under CommandBox (`host.docker.internal` reaches a database
+running on the Docker Desktop host; on Linux use the host's address or a shared
+Docker network).
 
 ## Webroot
 
