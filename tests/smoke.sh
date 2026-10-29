@@ -104,6 +104,59 @@ curl -s "http://127.0.0.1:$PORT/index.cfm" | grep -q "Hello from RustCFML" || fa
 docker rm -f "$cid" >/dev/null; trap - EXIT
 rm -rf "$tmp"
 
+echo "--- the extension check does not start the application"
+# The check runs before the server, at every container start. Booting the app's
+# Application.cfc there would open its database and fire its handlers with no page.
+tmp=$(mktemp -d)
+echo '{}' > "$tmp/.cfconfig.json"
+cat > "$tmp/Application.cfc" <<'CFC'
+<cfcomponent>
+  <cfset this.name = "smoke_no_boot" />
+  <cffunction name="onApplicationStart"><cfset fileWrite("/tmp/app-started", "x") /><cfreturn true /></cffunction>
+</cfcomponent>
+CFC
+docker run --rm --entrypoint sh -v "$tmp:/srv/app:ro" "$IMAGE" \
+  -c 'rustcfml-warm-extensions && test ! -e /tmp/app-started' \
+  || fail "the extension check ran the application's onApplicationStart"
+rm -rf "$tmp"
+
+echo "--- ... nor when its scratch directory is inside the webroot"
+# The probe's own empty Application.cfc stops the engine's upward search there.
+tmp=$(mktemp -d); mkdir -m 0777 "$tmp/scratch"
+echo '{}' > "$tmp/.cfconfig.json"
+cat > "$tmp/Application.cfc" <<'CFC'
+<cfcomponent>
+  <cfset this.name = "smoke_no_boot" />
+  <cffunction name="onApplicationStart"><cfset fileWrite("/tmp/app-started", "x") /><cfreturn true /></cffunction>
+</cfcomponent>
+CFC
+docker run --rm --entrypoint sh -v "$tmp:/srv/app" -e TMPDIR=/srv/app/scratch "$IMAGE" \
+  -c 'rustcfml-warm-extensions && test ! -e /tmp/app-started' \
+  || fail "with TMPDIR inside the webroot, the extension check ran onApplicationStart"
+rm -rf "$tmp"
+
+echo "--- a broken extension is still fatal from a relative webroot, or one with | and & in its path"
+tmp=$(mktemp -d); mkdir -p "$tmp/extensions"; echo junk > "$tmp/extensions/bad-0.0.1.rcx"
+set +e
+docker run --rm --entrypoint sh -v "$tmp:/srv/app:ro" -w /srv/app -e RUSTCFML_WEBROOT=. "$IMAGE" \
+  -c 'rustcfml-warm-extensions' >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" -eq 78 ] || fail "relative webroot: expected exit 78, got $rc"
+set +e
+out=$(docker run --rm --entrypoint sh -v "$tmp:/srv/a|b&c:ro" -e "RUSTCFML_WEBROOT=/srv/a|b&c" "$IMAGE" \
+  -c 'rustcfml-warm-extensions' 2>&1); rc=$?
+set -e
+echo "$out"
+[ "$rc" -eq 78 ] || fail "webroot with | and &: expected exit 78, got $rc"
+echo "$out" | grep -qF "/srv/a|b&c/extensions/bad-0.0.1.rcx" || fail "webroot with | and &: path not reported as the webroot's"
+rm -rf "$tmp"
+
+echo "--- a read-only container still passes the extension check"
+tmp=$(mktemp -d); echo '{}' > "$tmp/.cfconfig.json"
+docker run --rm --read-only --entrypoint sh -v "$tmp:/srv/app:ro" "$IMAGE" -c 'rustcfml-warm-extensions' \
+  || fail "the extension check failed in a read-only container"
+rm -rf "$tmp"
+
 if [ -n "${SMOKE_RCX:-}" ]; then
   echo "--- real extension: $SMOKE_RCX"
   tmp=$(mktemp -d); mkdir -p "$tmp/extensions"; cp "$SMOKE_RCX" "$tmp/extensions/"
